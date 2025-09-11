@@ -43,7 +43,7 @@ class HTCGatewayCluster(GatewayCluster):
     Instantiates the HTCGatewayCluster
     """
 
-    def __init__(self, image_registry="registry.hub.docker.com", apptainer_image='coffeateam/coffea-base-almalinux8:0.7.22-py3.10', 
+    def __init__(self, image_registry="registry.hub.docker.com", apptainer_image='coffeateam/coffea-base-almalinux8:0.7.22-py3.10', node_match_expr='rank = (isDaskNode == True)',
                  **kwargs):
         self.scheduler_proxy_ip = kwargs.pop('', '131.225.218.222')
         self.batchWorkerJobs = []
@@ -52,7 +52,7 @@ class HTCGatewayCluster(GatewayCluster):
         self.apptainer_image = apptainer_image
         self.worker_memory = None
         self.worker_cores = None
-
+        self.node_match_expr = node_match_expr
         if self.cluster_options:
             if 'worker_memory' in self.cluster_options:
                 self.worker_memory = self.cluster_options.worker_memory
@@ -172,19 +172,19 @@ class HTCGatewayCluster(GatewayCluster):
         #+FERMIHTC_HTCDaskClusterOwner = """+username+"""
         
         # Prepare JDL
-        jdl = """executable = start.sh
-arguments = """+cluster_name+""" htcdask-worker_$(Cluster)_$(Process)
+        jdl = f"""executable = start.sh
+arguments = {cluster_name} htcdask-worker_$(Cluster)_$(Process)
 output = condor/htcdask-worker$(Cluster)_$(Process).out
 error = condor/htcdask-worker$(Cluster)_$(Process).err
 log = condor/htcdask-worker$(Cluster)_$(Process).log
-request_cpus = """+num_cores+"""
-request_memory = """+worker_mem+"""
+request_cpus = {num_cores}
+request_memory = {worker_mem}
 +isDaskJob = True
-requirements = (isDaskNode == True)
+{self.node_match_expr}
 should_transfer_files = yes
-transfer_input_files = """+credentials_dir+""", """+worker_space_dir+""" , """+condor_logdir+"""
+transfer_input_files = {credentials_dir}, {worker_space_dir}, {condor_logdir}
 when_to_transfer_output = ON_EXIT_OR_EVICT
-Queue """+str(n)+""
+Queue {n}"""
     
         with open(f"{tmproot}/htcdask_submitfile.jdl", 'w+') as f:
             f.writelines(jdl)
