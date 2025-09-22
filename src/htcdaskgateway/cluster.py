@@ -145,10 +145,10 @@ class HTCGatewayCluster(GatewayCluster):
             num_cores = str(options.worker_cores)
             print("Using Default worker_cores: ", num_cores, "cores")
 
-        os.makedirs(tmproot, exist_ok=True)
-        os.makedirs(condor_logdir, exist_ok=True)
-        os.makedirs(credentials_dir, exist_ok=True)
-        os.makedirs(worker_space_dir, exist_ok=True)
+        os.makedirs(tmproot, mode=0o700, exist_ok=True)
+        os.makedirs(condor_logdir, mode=0o700, exist_ok=True)
+        os.makedirs(credentials_dir, mode=0o700, exist_ok=True)
+        os.makedirs(worker_space_dir, mode=0o700, exist_ok=True)
 
         with open(f"{credentials_dir}/dask.crt", 'w') as f:
             f.write(security.tls_cert)
