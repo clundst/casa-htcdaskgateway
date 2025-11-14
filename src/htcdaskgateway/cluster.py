@@ -43,7 +43,7 @@ class HTCGatewayCluster(GatewayCluster):
     Instantiates the HTCGatewayCluster
     """
 
-    def __init__(self, image_registry="registry.hub.docker.com", apptainer_image='coffeateam/coffea-base-almalinux8:0.7.22-py3.10', 
+    def __init__(self, image_registry="registry.hub.docker.com", apptainer_image='coffeateam/coffea-base-almalinux8:0.7.22-py3.10', node_match_expr='rank = (isDaskNode == True)',
                  **kwargs):
         self.scheduler_proxy_ip = kwargs.pop('', '131.225.218.222')
         self.batchWorkerJobs = []
@@ -52,7 +52,7 @@ class HTCGatewayCluster(GatewayCluster):
         self.apptainer_image = apptainer_image
         self.worker_memory = None
         self.worker_cores = None
-
+        self.node_match_expr = node_match_expr
         if self.cluster_options:
             if 'worker_memory' in self.cluster_options:
                 self.worker_memory = self.cluster_options.worker_memory
@@ -88,7 +88,7 @@ class HTCGatewayCluster(GatewayCluster):
         await super()._stop_async()
 
         self.status = "closed"
-    
+
     def scale(self, n, **kwargs):
         """Scale the cluster to ``n`` workers.
         Parameters
@@ -103,20 +103,44 @@ class HTCGatewayCluster(GatewayCluster):
         #print("In the future, I will allow for Kubernetes workers as well"
         worker_type = 'htcondor'
         logger.warn(" worker_type: "+str(worker_type))
-        try:
-            if 'condor' in worker_type:
-                self.batchWorkerJobs = []
-                logger.info(" Scaling: "+str(n)+" HTCondor workers")
-                self.batchWorkerJobs.append(self.scale_batch_workers(n))
-                logger.debug(" New Cluster state ")
-                logger.debug(self.batchWorkerJobs)
-                return self.gateway.scale_cluster(self.name, n, **kwargs)
 
+        current_jobs = sum(x['n_jobs'] for x in self.batchWorkerJobs)
+
+        if n == current_jobs:
+            logger.info("Requested size %d equals current size, nothing to do.", n)
+            return
+
+        # scaling up
+        try:
+            if n > current_jobs:
+                to_add = n - current_jobs
+
+                logger.info(" Scaling up: adding "+str(to_add)+" HTCondor workers")
+                self.batchWorkerJobs.append(self.scale_batch_workers(to_add))
+            else:
+                to_remove = current_jobs - n
+                logger.info(" Scaling down: removing "+str(to_remove)+" HTCondor workers")
+
+                while to_remove > 0 and self.batchWorkerJobs:
+                    cluster = self.batchWorkerJobs[-1]
+                    if cluster['n_jobs'] <= to_remove:
+                        # remove whole cluster
+                        self._destroy_batch_cluster(cluster)
+                        self.batchWorkerJobs.pop()
+                        to_remove -= cluster['n_jobs']
+                        logger.debug(f"Removed cluster {cluster['ClusterId']}")
+                    else:
+                        self._remove_jobs_in_cluster(cluster, to_remove)
+                        logger.debug(f"Removed {to_remove} jobs from cluster {cluster['ClusterId']}")
+                        to_remove = 0
+                logger.debug(f"Scaling down complete, now {sum(x['n_jobs'] for x in self.batchWorkerJobs)}")
         except: 
             print(traceback.format_exc())
             logger.error("A problem has occurred while scaling via HTCondor, please check your proxy credentials")
             return False
-    
+
+        return self.gateway.scale_cluster(self.name, n, **kwargs)
+
     def scale_batch_workers(self, n):
         username = pwd.getpwuid( os.getuid() )[ 0 ]
         x509_file = f"x509up_u{os.getuid()}"
@@ -172,19 +196,19 @@ class HTCGatewayCluster(GatewayCluster):
         #+FERMIHTC_HTCDaskClusterOwner = """+username+"""
         
         # Prepare JDL
-        jdl = """executable = start.sh
-arguments = """+cluster_name+""" htcdask-worker_$(Cluster)_$(Process)
+        jdl = f"""executable = start.sh
+arguments = {cluster_name} htcdask-worker_$(Cluster)_$(Process)
 output = condor/htcdask-worker$(Cluster)_$(Process).out
 error = condor/htcdask-worker$(Cluster)_$(Process).err
 log = condor/htcdask-worker$(Cluster)_$(Process).log
-request_cpus = """+num_cores+"""
-request_memory = """+worker_mem+"""
+request_cpus = {num_cores}
+request_memory = {worker_mem}
 +isDaskJob = True
-requirements = (isDaskNode == True)
+{self.node_match_expr}
 should_transfer_files = yes
-transfer_input_files = """+credentials_dir+""", """+worker_space_dir+""" , """+condor_logdir+"""
+transfer_input_files = {credentials_dir}, {worker_space_dir}, {condor_logdir}
 when_to_transfer_output = ON_EXIT_OR_EVICT
-Queue """+str(n)+""
+Queue {n}"""
     
         with open(f"{tmproot}/htcdask_submitfile.jdl", 'w+') as f:
             f.writelines(jdl)
@@ -220,10 +244,7 @@ dask worker --name $2 --tls-ca-file /etc/dask-credentials/dask.crt --tls-cert /e
         cmd = "/usr/local/bin/condor_submit htcdask_submitfile.jdl | grep -oP '(?<=cluster )[^ ]*'"
         call = subprocess.check_output(['sh','-c',cmd], cwd=tmproot)
         
-        worker_dict = {}
         clusterid = call.decode().rstrip()[:-1]
-        worker_dict['ClusterId'] = clusterid
-        worker_dict['Iwd'] = tmproot
         try:
             cmd = "/usr/local/bin/condor_q "+clusterid+" -af GlobalJobId | awk '{print $1}'| awk -F '#' '{print $1}' | uniq"
             call = subprocess.check_output(['sh','-c',cmd], cwd=tmproot)
@@ -231,8 +252,12 @@ dask worker --name $2 --tls-ca-file /etc/dask-credentials/dask.crt --tls-cert /e
             logger.error("Error submitting HTCondor jobs, make sure you have a valid proxy and try again")
             return None
         scheddname = call.decode().rstrip()
-        worker_dict['ScheddName'] = scheddname
-        
+
+        worker_dict = {'ClusterId': clusterid,
+                       'Iwd': tmproot,
+                       'ScheddName': scheddname,
+                       'n_jobs': n}
+
         logger.info(" Success! submitted HTCondor jobs to "+scheddname+" with  ClusterId "+clusterid)
         return worker_dict
         
@@ -240,12 +265,34 @@ dask worker --name $2 --tls-ca-file /etc/dask-credentials/dask.crt --tls-cert /e
         username = pwd.getpwuid( os.getuid() )[ 0 ]
         logger.debug(" [WIP] Feature to be added ")
         logger.debug(" [NOOP] Scaled "+str(n)+"Kube workers, startup may take uo to 30 seconds")
-        
-    def destroy_batch_cluster_id(self, clusterid):
-        logger.info(" Shutting down HTCondor worker jobs from cluster "+clusterid)
-        cmd = "condor_rm "+self.batchWorkerJobs['ClusterId']+" -name "+self.batchWorkerJobs['ScheddName']
-        result = subprocess.check_output(['sh','-c',cmd], cwd=self.batchWorkerJobs['Iwd'])
-        logger.info(" "+result.decode().rstrip())
+
+    def _destroy_batch_cluster(self, cluster):
+        try:
+            cmd = f"condor_rm {cluster['ClusterId']} -name {cluster['ScheddName']}"
+            result = subprocess.check_output(['sh', '-c', cmd], cwd=cluster['Iwd'])
+            logger.info("Removed cluster %s: %s", cluster['ClusterId'], result.decode().rstrip())
+
+        except Exception as e:
+            logger.error("Failed to remove cluster %s: %s", cluster.get('ClusterId'), exc)
+
+    def _remove_jobs_in_cluster(self, cluster, n):
+        q_cmd = f"condor_q {cluster['ClusterId']} -af ProcId"
+
+        result = subprocess.check_output( ['sh', '-c', q_cmd], cwd=cluster['Iwd'] )
+        proc_ids = [int(x) for x in result.decode().split()]
+
+        if (n > len(proc_ids)):
+            logger.error("Error: requested to delete more jobs than exist in the cluster, deleting cluster")
+            self._destroy_batch_cluster(cluster)
+            return
+
+        full_ids = [f"{cluster['ClusterId']}.{procid}" for procid in proc_ids[:n] ]
+        rm_cmd = f"condor_rm {' '.join(full_ids)} -name {cluster['ScheddName']}"
+
+        result = subprocess.check_output(['sh', '-c', rm_cmd], cwd=cluster['Iwd'])
+        logger.info("Removed %d jobs in cluster %s: %s", n, cluster['ClusterId'], result.decode().rstrip())
+
+        cluster['n_jobs'] -= n
 
     def destroy_all_batch_clusters(self):
         logger.info(" Shutting down HTCondor worker jobs (if any)")
