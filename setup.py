@@ -4,7 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="casa-htcdaskgateway",
+    name="casahtcdaskgateway",
     version="0.1.0",
     author="Carl Lundstedt",
     author_email="clundstedt@unl.edu",
