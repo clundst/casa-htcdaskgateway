@@ -4,15 +4,15 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="htcdaskgateway",
-    version="0.1.25",
-    author="Maria P. Acosta F./Fermilab EAF project",
-    author_email="macosta@fnal.gov",
+    name="casa-htcdaskgateway",
+    version="0.1.0",
+    author="Carl Lundstedt",
+    author_email="clundstedt@unl.edu",
     description="Launches a Dask Gateway cluster in K8s and joins HTCondor workers to it",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license='Apache',
-    url="https://github.com/mapsacosta/htcdaskgateway",
+    url="https://github.com/clundst/casa-htcdaskgateway",
     packages=setuptools.find_packages(where='src'),
     package_dir={'': 'src', },
     classifiers=[
